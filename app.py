@@ -156,7 +156,8 @@ def conectar():
             "bens":gor("Bens",["Descrição","Tipo","Valor","Proprietário"]),
             "regras":gor("Regras",["Descricao","Categoria"]),
             "fixos":gor("Fixos",["Descricao","Categoria","Valor","Pessoa","DiaVencimento"]),
-            "parcelas":gor("Parcelas",["Descricao","Categoria","Valor","TotalParcelas","ParcelaAtual","Pessoa","DataInicio"])}
+            "parcelas":gor("Parcelas",["Descricao","Categoria","Valor","TotalParcelas","ParcelaAtual","Pessoa","DataInicio"]),
+            "metas":gor("Metas",["Categoria","ValorMeta","Mes","Ano"])}
 ws=conectar()
 
 def preparar(df):
@@ -184,10 +185,13 @@ def load_regras():  return retry_load(ws["regras"])
 def load_fixos():   return retry_load(ws["fixos"])
 @st.cache_data(ttl=300,show_spinner=False)
 def load_parcelas():return retry_load(ws["parcelas"])
+@st.cache_data(ttl=300,show_spinner=False)
+def load_metas():   return retry_load(ws["metas"])
 def load(w):        return retry_load(w)
 
 with st.spinner("🔄 Carregando..."):
-    df=load_lanc(); regras=load_regras(); fixos=load_fixos(); parcelas=load_parcelas()
+    df=load_lanc(); regras=load_regras(); fixos=load_fixos()
+    parcelas=load_parcelas(); metas=load_metas()
 def converter_valor(v):
     """Converte valor em qualquer formato para float."""
     try:
@@ -845,11 +849,146 @@ def widget_voz(categorias_despesa, categorias_receita, pessoas):
 
 
 # ══════════════════════════════════════════
+# METAS MENSAIS
+# ══════════════════════════════════════════
+ALERTA_META_PCT = 80  # alerta em 80%
+
+def get_metas_mes(mes, ano):
+    """Retorna dict {categoria: valor_meta} para o mês/ano."""
+    if metas.empty: return {}
+    m = metas.copy()
+    for c in ["Mes","Ano","ValorMeta"]:
+        if c not in m.columns: return {}
+    m["Mes"] = pd.to_numeric(m["Mes"], errors="coerce")
+    m["Ano"] = pd.to_numeric(m["Ano"], errors="coerce")
+    m["ValorMeta"] = m["ValorMeta"].apply(converter_valor)
+    filtro = m[(m["Mes"]==mes) & (m["Ano"]==ano)]
+    if filtro.empty:
+        # Tenta meta genérica (sem mês específico, Mes=0)
+        filtro = m[m["Mes"]==0]
+    return dict(zip(filtro["Categoria"], filtro["ValorMeta"]))
+
+def salvar_meta(categoria, valor, mes, ano):
+    """Salva ou atualiza meta na planilha."""
+    try:
+        todos = ws["metas"].get_all_records()
+        for i, r in enumerate(todos):
+            if (str(r.get("Categoria",""))==categoria and
+                str(r.get("Mes",""))==str(mes) and
+                str(r.get("Ano",""))==str(ano)):
+                ws["metas"].update(f"B{i+2}", [[valor]])
+                load_metas.clear()
+                return
+        ws["metas"].append_row([categoria, valor, mes, ano])
+        load_metas.clear()
+    except Exception as e:
+        st.error(f"❌ Erro ao salvar meta: {e}")
+
+def alertas_metas(df_mes, mes, ano):
+    """Gera alertas de metas para o mês."""
+    metas_mes = get_metas_mes(mes, ano)
+    alertas_list = []
+    for cat, meta in metas_mes.items():
+        if meta <= 0: continue
+        gasto = df_mes[df_mes["Categoria"]==cat]["Valor"].sum() if not df_mes.empty else 0
+        pct = gasto / meta * 100
+        if pct >= 100:
+            alertas_list.append(("error", f"🔴 Meta estourada: {cat}",
+                f"Gasto R$ {gasto:,.2f} de R$ {meta:,.2f} ({pct:.0f}%)"))
+        elif pct >= ALERTA_META_PCT:
+            alertas_list.append(("warn", f"⚠️ Meta em {pct:.0f}%: {cat}",
+                f"Gasto R$ {gasto:,.2f} de R$ {meta:,.2f} — faltam R$ {meta-gasto:,.2f}"))
+    return alertas_list
+
+# ══════════════════════════════════════════
+# PROJEÇÃO DE FLUXO DE CAIXA
+# ══════════════════════════════════════════
+def projetar_fluxo(df, fixos, parcelas, meses_ahead=3):
+    """
+    Projeta receitas e despesas para os próximos N meses.
+    Lógica:
+    - Receita: média dos últimos 3 meses com entrada
+    - Despesas variáveis: média dos últimos 3 meses de saída
+    - Fixos: soma dos fixos cadastrados (recorrentes garantidos)
+    - Parcelas: soma das parcelas ainda ativas
+    """
+    hoje_dt = datetime.today()
+    resultado = []
+
+    # Calcula médias históricas (últimos 3 meses)
+    df_hist = df.copy()
+    df_hist["_dt"] = pd.to_datetime(df_hist["Data"], errors="coerce")
+    df_hist = df_hist.dropna(subset=["_dt"])
+
+    medias_rec  = []
+    medias_desp = []
+    for i in range(1, 4):
+        m = (hoje_dt.month - i - 1) % 12 + 1
+        a = hoje_dt.year - ((hoje_dt.month - i - 1) // 12 + 1) + (0 if (hoje_dt.month-i)>0 else 0)
+        if (hoje_dt.month - i) <= 0: a = hoje_dt.year - 1
+        else: a = hoje_dt.year
+        dm = df_hist[(df_hist["_dt"].dt.month==m)&(df_hist["_dt"].dt.year==a)]
+        medias_rec.append(dm[dm["Tipo"]=="Entrada"]["Valor"].sum())
+        medias_desp.append(dm[dm["Tipo"]=="Saída"]["Valor"].sum())
+
+    media_rec  = sum(medias_rec) / max(len([x for x in medias_rec if x>0]), 1)
+    media_desp = sum(medias_desp) / max(len([x for x in medias_desp if x>0]), 1)
+
+    # Soma fixos recorrentes
+    total_fixos = 0
+    if not fixos.empty and "Valor" in fixos.columns:
+        total_fixos = fixos["Valor"].apply(converter_valor).sum()
+
+    # Soma parcelas ativas por mês
+    parc_por_mes = {}
+    if not parcelas.empty:
+        for _, p in parcelas.iterrows():
+            try:
+                at  = int(p.get("ParcelaAtual", 0))
+                tot = int(p.get("TotalParcelas", 0))
+                val = converter_valor(p.get("Valor", 0))
+                dt_ini = pd.to_datetime(p.get("DataInicio",""), errors="coerce")
+                if pd.isna(dt_ini): continue
+                for offset in range(tot - at + 1):
+                    m_p = (dt_ini.month + at - 1 + offset - 1) % 12 + 1
+                    a_p = dt_ini.year + (dt_ini.month + at - 1 + offset - 1) // 12
+                    chave = (a_p, m_p)
+                    parc_por_mes[chave] = parc_por_mes.get(chave, 0) + val
+            except: pass
+
+    saldo_acum = df["Valor"][df["Tipo"]=="Entrada"].sum() - df["Valor"][df["Tipo"]=="Saída"].sum() \
+                 if not df.empty else 0
+
+    for i in range(1, meses_ahead + 1):
+        m_fut = (hoje_dt.month + i - 1) % 12 + 1
+        a_fut = hoje_dt.year + (hoje_dt.month + i - 1) // 12
+        label = f"{MESES_PT[m_fut-1][:3]}/{a_fut}"
+
+        parc_mes = parc_por_mes.get((a_fut, m_fut), 0)
+        desp_proj = media_desp + total_fixos + parc_mes
+        rec_proj  = media_rec
+
+        saldo_acum += rec_proj - desp_proj
+        resultado.append({
+            "label":     label,
+            "mes":       m_fut,
+            "ano":       a_fut,
+            "receita":   rec_proj,
+            "despesa":   desp_proj,
+            "fixos":     total_fixos,
+            "parcelas":  parc_mes,
+            "variavel":  media_desp,
+            "saldo_acum":saldo_acum,
+        })
+
+    return resultado
+
+# ══════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════
 tabs=st.tabs(["🏠 Painel Geral","📊 Dashboard","➕ Lançamentos","💚 Receitas",
               "🏦 OFX · IA","📄 PDF","📥 CSV","⚙️ Fixos","💳 Parcelas",
-              "📈 Investimentos","🏛️ Patrimônio","📦 Bens"])
+              "🎯 Metas","📈 Projeção","💹 Investimentos","🏛️ Patrimônio","📦 Bens"])
 
 # ══════════════════════════════════════════
 # TAB 0 — PAINEL GERAL
@@ -932,9 +1071,35 @@ with tabs[0]:
     with col_dir:
         st.markdown('<div class="section-title">🔔 Alertas Inteligentes</div>',unsafe_allow_html=True)
         tmap={"error":("🔴","error"),"warn":("🟡","warn"),"ok":("🟢","ok"),"info":("🔵","info")}
+
+        # Alertas financeiros gerais
         for tipo,titulo,msg in alertas(df.copy(),fixos,parcelas):
             ico_a,cls_a=tmap.get(tipo,("ℹ️","info"))
             st.markdown(f'<div class="alert-card {cls_a}"><div class="alert-icon">{ico_a}</div><div><div class="alert-title">{titulo}</div><div class="alert-msg">{msg}</div></div></div>',unsafe_allow_html=True)
+
+        # Alertas de metas
+        alertas_m = alertas_metas(dm, ma, ya)
+        if alertas_m:
+            for tipo,titulo,msg in alertas_m:
+                ico_a,cls_a=tmap.get(tipo,("ℹ️","info"))
+                st.markdown(f'<div class="alert-card {cls_a}"><div class="alert-icon">{ico_a}</div><div><div class="alert-title">{titulo}</div><div class="alert-msg">{msg}</div></div></div>',unsafe_allow_html=True)
+
+        # ── Metas do mês ──
+        metas_mes = get_metas_mes(ma, ya)
+        if metas_mes:
+            st.markdown("<br>",unsafe_allow_html=True)
+            st.markdown('<div class="section-title">🎯 Metas do Mês</div>',unsafe_allow_html=True)
+            for cat, meta in metas_mes.items():
+                gasto = dm[dm["Categoria"]==cat]["Valor"].sum() if not dm.empty else 0
+                pct_m = min(gasto/meta*100, 100) if meta>0 else 0
+                cor_m = "#22d3a0" if pct_m<80 else "#fbbf24" if pct_m<100 else "#f8625a"
+                st.markdown(f"""<div style="padding:.5rem .75rem;margin:.25rem 0;background:var(--surface);border-radius:8px;border-left:3px solid {cor_m};">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:.25rem;">
+                        <span style="font-size:.82rem;">🎯 {cat}</span>
+                        <span style="font-size:.78rem;color:{cor_m};font-weight:700;">R$ {gasto:,.2f} / R$ {meta:,.2f}</span>
+                    </div>
+                    <div class="prog-bar" style="height:5px;"><div class="prog-fill" style="width:{pct_m:.0f}%;background:{cor_m};"></div></div>
+                </div>""", unsafe_allow_html=True)
 
         st.markdown("<br>",unsafe_allow_html=True)
         st.markdown('<div class="section-title">📋 Fixos & Parcelas Ativos</div>',unsafe_allow_html=True)
@@ -1446,10 +1611,187 @@ with tabs[8]:
                 except: pass
 
 # ══════════════════════════════════════════
-# TAB 9 — INVESTIMENTOS
+# TAB 9 — METAS
 # ══════════════════════════════════════════
 with tabs[9]:
-    st.markdown('<div class="section-title">📈 Simulador de Investimentos</div>',unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🎯 Metas Mensais de Gasto</div>', unsafe_allow_html=True)
+    st.markdown("""<div style="background:var(--accent-dim);border:1px solid rgba(41,217,245,.22);
+        border-radius:12px;padding:.9rem 1.2rem;margin-bottom:1.2rem;">
+        <b style="color:var(--accent);">Como funciona:</b>
+        <span style="color:var(--text-sec);font-size:.86rem;"> Defina um teto de gasto por categoria.
+        Quando atingir 80% do limite, aparece alerta no Painel Geral automaticamente.</span>
+    </div>""", unsafe_allow_html=True)
+
+    # Seletor de mês/ano
+    cm1,cm2 = st.columns(2)
+    mes_meta = cm1.selectbox("📅 Mês", list(range(1,13)),
+        index=hoje.month-1, format_func=lambda x: MESES_PT[x-1], key="meta_mes")
+    ano_meta = cm2.number_input("📅 Ano", min_value=2020, max_value=2030,
+        value=hoje.year, step=1, key="meta_ano")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Categorias sugeridas + todas as despesas
+    cats_meta = [
+        "Supermercado / Feira", "Restaurante / Delivery",
+        "Combustível", "Lazer / Passeios Família",
+        "Roupas / Calçados / Acessórios", "Farmácia",
+        "Padaria / Café", "Lanche / Fast Food",
+        "Barbearia / Beleza / Estética", "Eletrônicos / Tecnologia",
+    ] + [c for c in cat_desp if c not in [
+        "Supermercado / Feira","Restaurante / Delivery","Combustível",
+        "Lazer / Passeios Família","Roupas / Calçados / Acessórios","Farmácia",
+        "Padaria / Café","Lanche / Fast Food","Barbearia / Beleza / Estética",
+        "Eletrônicos / Tecnologia"]]
+
+    metas_atuais = get_metas_mes(mes_meta, ano_meta)
+
+    st.markdown('<div class="section-title">💰 Definir Metas</div>', unsafe_allow_html=True)
+
+    # Gasto real do mês selecionado para mostrar contexto
+    df_meta_mes = df.copy()
+    df_meta_mes["_dt"] = pd.to_datetime(df_meta_mes["Data"], errors="coerce")
+    dm_meta = df_meta_mes[
+        (df_meta_mes["_dt"].dt.month==mes_meta) &
+        (df_meta_mes["_dt"].dt.year==ano_meta) &
+        (df_meta_mes["Tipo"]=="Saída")
+    ]
+
+    for cat in cats_meta:
+        val_atual = metas_atuais.get(cat, 0.0)
+        gasto_real = dm_meta[dm_meta["Categoria"]==cat]["Valor"].sum()
+
+        c1,c2,c3,c4 = st.columns([3,2,2,1])
+        c1.markdown(f'<div style="font-size:.84rem;padding:.5rem 0;">{cat}</div>',
+                   unsafe_allow_html=True)
+        nova_meta = c2.number_input(
+            "Meta (R$)", min_value=0.0, value=float(val_atual),
+            format="%.2f", key=f"meta_{cat}", label_visibility="collapsed"
+        )
+        pct_m = (gasto_real/nova_meta*100) if nova_meta>0 else 0
+        cor_m = "#22d3a0" if pct_m<80 else "#fbbf24" if pct_m<100 else "#f8625a"
+        c3.markdown(f'<div style="font-size:.78rem;color:{cor_m};padding:.5rem 0;">Gasto: R$ {gasto_real:,.2f} ({pct_m:.0f}%)</div>',
+                   unsafe_allow_html=True)
+        if c4.button("💾", key=f"save_meta_{cat}"):
+            if nova_meta > 0:
+                salvar_meta(cat, nova_meta, mes_meta, ano_meta)
+                st.success(f"✅ Meta de R$ {nova_meta:,.2f} salva para {cat}!")
+                st.rerun()
+
+    # Resumo das metas
+    if metas_atuais:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f'<div class="section-title">📊 Resumo — {MESES_PT[mes_meta-1]}/{ano_meta}</div>',
+                   unsafe_allow_html=True)
+        total_meta  = sum(metas_atuais.values())
+        total_gasto = sum(dm_meta[dm_meta["Categoria"]==c]["Valor"].sum()
+                         for c in metas_atuais.keys())
+        m1,m2,m3 = st.columns(3)
+        m1.metric("🎯 Total orçado", f"R$ {total_meta:,.2f}")
+        m2.metric("💸 Total gasto",  f"R$ {total_gasto:,.2f}")
+        m3.metric("💰 Disponível",   f"R$ {total_meta-total_gasto:,.2f}")
+
+# ══════════════════════════════════════════
+# TAB 10 — PROJEÇÃO DE FLUXO DE CAIXA
+# ══════════════════════════════════════════
+with tabs[10]:
+    st.markdown('<div class="section-title">📈 Projeção de Fluxo de Caixa — Próximos 3 Meses</div>',
+               unsafe_allow_html=True)
+    st.markdown("""<div style="background:var(--accent2-dim);border:1px solid rgba(139,92,246,.22);
+        border-radius:12px;padding:.9rem 1.2rem;margin-bottom:1.2rem;">
+        <b style="color:var(--accent2);">Como a IA projeta:</b>
+        <span style="color:var(--text-sec);font-size:.86rem;">
+        Média dos últimos 3 meses de receita e despesa variável +
+        fixos recorrentes cadastrados + parcelas ativas no período.</span>
+    </div>""", unsafe_allow_html=True)
+
+    with st.spinner("🤖 Calculando projeção..."):
+        proj = projetar_fluxo(df, fixos, parcelas, meses_ahead=3)
+
+    if not proj:
+        st.info("Dados insuficientes para projeção. Adicione mais lançamentos.")
+    else:
+        # KPIs de projeção
+        p1,p2,p3 = st.columns(3)
+        for col,p in zip([p1,p2,p3], proj):
+            saldo_cor = "var(--green)" if p["saldo_acum"]>=0 else "var(--red)"
+            col.markdown(f"""<div class="kpi-card {'blue' if p['saldo_acum']>=0 else 'red'}">
+                <div class="kpi-label">📅 {p['label']}</div>
+                <div class="kpi-value" style="font-size:1.3rem;">R$ {p['saldo_acum']:,.0f}</div>
+                <div class="kpi-sub">Saldo acumulado projetado</div>
+                <div style="margin-top:.5rem;font-size:.75rem;color:var(--text-sec);">
+                    Receita: R$ {p['receita']:,.0f}<br>
+                    Despesa: R$ {p['despesa']:,.0f}
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Gráfico de barras empilhadas
+        st.markdown('<div class="section-title">📊 Composição das Despesas Projetadas</div>',
+                   unsafe_allow_html=True)
+        labels_p = [p["label"] for p in proj]
+        fig_proj = go.Figure()
+        fig_proj.add_trace(go.Bar(
+            name="Variável (histórico)", x=labels_p,
+            y=[p["variavel"] for p in proj],
+            marker_color="#f8625a", opacity=0.85
+        ))
+        fig_proj.add_trace(go.Bar(
+            name="Fixos recorrentes", x=labels_p,
+            y=[p["fixos"] for p in proj],
+            marker_color="#fbbf24", opacity=0.85
+        ))
+        fig_proj.add_trace(go.Bar(
+            name="Parcelas ativas", x=labels_p,
+            y=[p["parcelas"] for p in proj],
+            marker_color="#8b5cf6", opacity=0.85
+        ))
+        fig_proj.add_trace(go.Scatter(
+            name="Receita projetada", x=labels_p,
+            y=[p["receita"] for p in proj],
+            mode="lines+markers",
+            line=dict(color="#22d3a0", width=3),
+            marker=dict(size=10)
+        ))
+        fig_proj.update_layout(
+            barmode="stack",
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font_color="#b8c5e0",
+            legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", y=-0.2),
+            xaxis=dict(gridcolor="#2a3a5c"),
+            yaxis=dict(gridcolor="#2a3a5c", title="R$"),
+            margin=dict(t=10, b=10, l=0, r=0),
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig_proj, use_container_width=True)
+
+        # Tabela detalhada
+        st.markdown('<div class="section-title">📋 Detalhamento da Projeção</div>',
+                   unsafe_allow_html=True)
+        df_proj = pd.DataFrame([{
+            "Mês":              p["label"],
+            "Receita proj.":    f"R$ {p['receita']:,.2f}",
+            "Despesa variável": f"R$ {p['variavel']:,.2f}",
+            "Fixos":            f"R$ {p['fixos']:,.2f}",
+            "Parcelas":         f"R$ {p['parcelas']:,.2f}",
+            "Total despesa":    f"R$ {p['despesa']:,.2f}",
+            "Saldo acum.":      f"R$ {p['saldo_acum']:,.2f}",
+        } for p in proj])
+        st.dataframe(df_proj, use_container_width=True, hide_index=True)
+
+        st.markdown("""<div style="background:var(--yellow-dim);border:1px solid rgba(251,191,36,.2);
+            border-radius:10px;padding:.75rem 1rem;margin-top:.5rem;font-size:.8rem;color:var(--muted);">
+            ⚠️ <b style="color:var(--yellow);">Atenção:</b>
+            Projeção baseada em médias históricas. Receitas e despesas reais podem variar.
+            Quanto mais lançamentos você tiver, mais precisa fica a projeção.
+        </div>""", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════
+# TAB 11 — INVESTIMENTOS
+# ══════════════════════════════════════════
+with tabs[11]:
+    st.markdown('<div class="section-title">💹 Simulador de Investimentos</div>',unsafe_allow_html=True)
     cc2,cg2=st.columns([1,2])
     with cc2:
         vi=st.number_input("💰 Capital inicial",value=1000.0,format="%.2f"); ap=st.number_input("📅 Aporte mensal",value=500.0,format="%.2f")
@@ -1467,9 +1809,9 @@ with tabs[9]:
         st.plotly_chart(fig,use_container_width=True)
 
 # ══════════════════════════════════════════
-# TAB 10 — PATRIMÔNIO
+# TAB 12 — PATRIMÔNIO
 # ══════════════════════════════════════════
-with tabs[10]:
+with tabs[12]:
     st.markdown('<div class="section-title">🏛️ Balanço Patrimonial</div>',unsafe_allow_html=True)
     c1,c2,c3=st.columns(3)
     bv=c1.number_input("🏠 Bens",min_value=0.0,format="%.2f"); iv=c2.number_input("📈 Investimentos",min_value=0.0,format="%.2f"); dv=c3.number_input("💸 Dívidas",min_value=0.0,format="%.2f")
@@ -1481,9 +1823,9 @@ with tabs[10]:
         st.plotly_chart(fig,use_container_width=True)
 
 # ══════════════════════════════════════════
-# TAB 11 — BENS
+# TAB 13 — BENS
 # ══════════════════════════════════════════
-with tabs[11]:
+with tabs[13]:
     st.markdown('<div class="section-title">📦 Cadastro de Bens</div>',unsafe_allow_html=True)
     cf2,cl2=st.columns([1,2])
     with cf2:
