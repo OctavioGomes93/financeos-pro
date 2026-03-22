@@ -3,5 +3,6 @@ pandas
 gspread
 oauth2client
 plotly
+rapidfuzz
 pdfplumber
 ofxparse
