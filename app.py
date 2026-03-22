@@ -886,6 +886,42 @@ with tabs[0]:
     pc=min(pct_c,100); cc="#22d3a0" if pct_c<70 else "#fbbf24" if pct_c<90 else "#f8625a"
     st.markdown(f'<div style="margin:.8rem 0 1.5rem;"><div style="display:flex;justify-content:space-between;font-size:.76rem;color:var(--muted);margin-bottom:.3rem;"><span>Orçamento mensal consumido</span><span>{pct_c:.1f}%</span></div><div class="prog-bar"><div class="prog-fill" style="width:{pc:.1f}%;background:{cc};"></div></div></div>',unsafe_allow_html=True)
 
+    # ── BOTÃO RELATÓRIO PDF ──
+    st.markdown('<div class="section-title">📄 Relatório Mensal</div>', unsafe_allow_html=True)
+    col_rel1, col_rel2, col_rel3 = st.columns([1,1,2])
+    with col_rel1:
+        mes_rel = st.selectbox("Mês", list(range(1,13)),
+            index=ma-1, format_func=lambda x: MESES_PT[x-1], key="rel_mes")
+    with col_rel2:
+        ano_rel = st.number_input("Ano", min_value=2020, max_value=2030,
+            value=ya, step=1, key="rel_ano")
+    with col_rel3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("📄 Gerar Relatório PDF", use_container_width=True, key="btn_pdf"):
+            with st.spinner(f"📊 Gerando relatório de {MESES_PT[mes_rel-1]}/{ano_rel}..."):
+                try:
+                    import subprocess, sys
+                    result = subprocess.run(
+                        [sys.executable, "relatorio.py", str(ano_rel), str(mes_rel)],
+                        capture_output=True, text=True, cwd=os.getcwd()
+                    )
+                    nome_pdf = f"Relatorio_Financeiro_{MESES_PT[mes_rel-1]}_{ano_rel}.pdf"
+                    if os.path.exists(nome_pdf):
+                        with open(nome_pdf, "rb") as f:
+                            st.download_button(
+                                label=f"⬇️ Baixar {nome_pdf}",
+                                data=f.read(),
+                                file_name=nome_pdf,
+                                mime="application/pdf",
+                                key="download_pdf"
+                            )
+                        st.success(f"✅ Relatório de {MESES_PT[mes_rel-1]}/{ano_rel} gerado!")
+                    else:
+                        st.error(f"❌ Erro: {result.stderr[:300]}")
+                except Exception as e:
+                    st.error(f"❌ Erro: {e}")
+    st.markdown("<br>", unsafe_allow_html=True)
+
     # ── ATALHO RÁPIDO DE VOZ ──
     st.markdown('<div class="section-title">🎙️ Lançamento Rápido por Voz</div>', unsafe_allow_html=True)
     widget_voz(cat_desp, cat_rec, pessoas)
