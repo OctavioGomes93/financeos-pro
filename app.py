@@ -7,6 +7,8 @@ import hashlib
 import calendar
 import tempfile
 import streamlit as st
+import os
+port = int(os.environ.get("PORT", 8080))
 import pandas as pd
 import gspread
 import pdfplumber
@@ -1842,3 +1844,5 @@ with tabs[13]:
             st.dataframe(dfb.drop(columns=["ID"],errors="ignore"),use_container_width=True,hide_index=True)
             tot=pd.to_numeric(dfb.get("Valor",pd.Series([])),errors="coerce").sum()
             st.markdown(f'<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1rem 1.5rem;margin-top:1rem;display:flex;justify-content:space-between;align-items:center;"><span style="color:var(--muted);font-size:.84rem;">Total em Bens</span><span style="font-family:Syne,sans-serif;font-size:1.4rem;font-weight:800;color:var(--accent);">R$ {tot:,.2f}</span></div>',unsafe_allow_html=True)
+if __name__ == "__main__":
+    pass
