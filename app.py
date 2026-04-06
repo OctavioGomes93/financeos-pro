@@ -150,7 +150,18 @@ def conectar():
     scope=["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
     import json
 
-    creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS"))
+    creds_json = (
+            os.environ.get("GOOGLE_CREDENTIALS_JSON") or
+            os.environ.get("GOOGLE_CREDENTIALS") or
+            ""
+    )
+    if creds_json:
+        creds_dict = json.loads(creds_json)
+    else:
+        # Usa arquivo local
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            os.path.join(os.getcwd(), "credenciais.json"), scope
+        )
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client=gspread.authorize(creds); planilha=client.open("Controle de Despesas")
     def gor(nome,cols):
