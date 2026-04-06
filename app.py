@@ -147,22 +147,16 @@ except ImportError:
 # ══════════════════════════════════════════
 @st.cache_resource
 def conectar():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    import os
+    import json
 
-    creds_json = (
-            os.environ.get("GOOGLE_CREDENTIALS_JSON") or
-            os.environ.get("GOOGLE_CREDENTIALS") or
-            ""
-    )
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
 
-    if creds_json:
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            json.loads(creds_json), scope
-        )
-    else:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(
-            os.path.join(os.getcwd(), "credenciais.json"), scope
-        )
+    creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 
     client = gspread.authorize(creds)
     planilha = client.open("Controle de Despesas")
