@@ -56,9 +56,18 @@ def conectar():
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive"
     ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        os.path.join(os.getcwd(), "credenciais.json"), scope
-    )
+    import os
+    import json
+    from oauth2client.service_account import ServiceAccountCredentials
+
+    def conectar():
+        scope = ["https://spreadsheets.google.com/feeds",
+                 "https://www.googleapis.com/auth/drive"]
+
+        creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+
+        return creds
     client   = gspread.authorize(creds)
     planilha = client.open("Controle de Despesas")
     return planilha.sheet1

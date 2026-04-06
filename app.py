@@ -148,7 +148,10 @@ except ImportError:
 @st.cache_resource
 def conectar():
     scope=["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    creds=ServiceAccountCredentials.from_json_keyfile_name(os.path.join(os.getcwd(),"credenciais.json"),scope)
+    import json
+
+    creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS"))
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client=gspread.authorize(creds); planilha=client.open("Controle de Despesas")
     def gor(nome,cols):
         try: return planilha.worksheet(nome)
