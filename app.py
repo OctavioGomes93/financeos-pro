@@ -147,33 +147,43 @@ except ImportError:
 # ══════════════════════════════════════════
 @st.cache_resource
 def conectar():
-    scope=["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    import json
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
     creds_json = (
             os.environ.get("GOOGLE_CREDENTIALS_JSON") or
             os.environ.get("GOOGLE_CREDENTIALS") or
             ""
     )
+
     if creds_json:
-        creds_dict = json.loads(creds_json)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+            json.loads(creds_json), scope
+        )
     else:
-        # Usa arquivo local
         creds = ServiceAccountCredentials.from_json_keyfile_name(
             os.path.join(os.getcwd(), "credenciais.json"), scope
         )
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    client=gspread.authorize(creds); planilha=client.open("Controle de Despesas")
-    def gor(nome,cols):
-        try: return planilha.worksheet(nome)
+
+    client = gspread.authorize(creds)
+    planilha = client.open("Controle de Despesas")
+
+    def gor(nome, cols):
+        try:
+            return planilha.worksheet(nome)
         except:
-            ws=planilha.add_worksheet(title=nome,rows="200",cols="20"); ws.append_row(cols); return ws
-    return {"lanc":planilha.sheet1,
-            "bens":gor("Bens",["Descrição","Tipo","Valor","Proprietário"]),
-            "regras":gor("Regras",["Descricao","Categoria"]),
-            "fixos":gor("Fixos",["Descricao","Categoria","Valor","Pessoa","DiaVencimento"]),
-            "parcelas":gor("Parcelas",["Descricao","Categoria","Valor","TotalParcelas","ParcelaAtual","Pessoa","DataInicio"]),
-            "metas":gor("Metas",["Categoria","ValorMeta","Mes","Ano"])}
+            ws = planilha.add_worksheet(title=nome, rows="200", cols="20")
+            ws.append_row(cols)
+            return ws
+
+    return {
+        "lanc": planilha.sheet1,
+        "bens": gor("Bens", ["Descrição", "Tipo", "Valor", "Proprietário"]),
+        "regras": gor("Regras", ["Descricao", "Categoria"]),
+        "fixos": gor("Fixos", ["Descricao", "Categoria", "Valor", "Pessoa", "DiaVencimento"]),
+        "parcelas": gor("Parcelas",
+                        ["Descricao", "Categoria", "Valor", "TotalParcelas", "ParcelaAtual", "Pessoa", "DataInicio"]),
+        "metas": gor("Metas", ["Categoria", "ValorMeta", "Mes", "Ano"]),
+    }
 ws=conectar()
 
 def preparar(df):
